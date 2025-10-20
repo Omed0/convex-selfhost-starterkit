@@ -1,3 +1,8 @@
+## Contributing
+
+This is a personal fork. For contributions to the original project, please visit the upstream repository.
+
+
 # Better Convex
 
 A modern Next.js starter template featuring **Convex** backend with **Better Auth** integration, showcasing type-safe backend patterns and custom authentication helpers.
