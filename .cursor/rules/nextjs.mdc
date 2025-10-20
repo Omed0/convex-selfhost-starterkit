@@ -1,0 +1,181 @@
+---
+description: Use Promise-based params and searchParams, type-safe routing with defineRoute, and nuqs for URL query state management in Next.js applications
+globs: **/route.tsx,**/page.tsx,**/route.ts,*.tsx
+alwaysApply: false
+---
+# Next.js Routing & Navigation
+
+<version>1.0.0</version>
+
+## Context
+- Next.js 14 changed the behavior of params and searchParams to be Promise-based
+- This affects route.ts/tsx and page.tsx/ts files using the App Router
+- Type-safe routing system using defineRoute utility
+- For client-side URL query state management, always use nuqs instead of useSearchParams
+
+## Requirements
+
+### Promise-based Params
+- Always type params and searchParams as Promises in route handlers and page components
+- Use the correct TypeScript notation for Promise-based parameters
+- Ensure you properly await the Promise when accessing the parameters
+
+### Type-Safe Routing
+- Define route schemas in `RouteSchemas` type with proper typing for params and search queries
+- Create routes using the `defineRoute` utility with appropriate generic types
+- Use square brackets notation for dynamic route parameters
+- Import routes from the central routes file when navigating between pages
+- Pass parameters directly to the route function (not wrapped in a params object)
+
+### URL Query State (nuqs)
+- **NEVER use useSearchParams from Next.js** - always use nuqs for URL query state
+- Define reusable query state hooks in a centralized location
+- Use appropriate parsers based on parameter data type
+- Configure history mode based on navigation requirements
+- Use clearOnDefault to keep URLs clean
+- Handle URL updates with void to prevent promise-related linting issues
+
+## Examples
+
+<example>
+// In a page.tsx file
+export default async function Page({ 
+  params,
+  searchParams 
+}: { 
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ query?: string }>
+}) {
+  // Await the params and searchParams
+  const { id } = await params;
+  const { query } = await searchParams;
+  
+  // Use the resolved values
+  return <div>ID: {id}, Query: {query}</div>;
+}
+</example>
+
+<example>
+// In a route.ts file
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> }
+) {
+  const { slug } = await params;
+  
+  return Response.json({ slug });
+}
+</example>
+
+<example>
+// URL Query State Management with nuqs
+// In src/lib/navigation/useQueryState.ts
+export const useFilterState = () => {
+  return useQueryState(
+    'filter',
+    parseAsStringEnum(['all', 'active', 'completed'])
+      .withDefault('all')
+      .withOptions({ 
+        history: 'push',
+        clearOnDefault: true 
+      })
+  );
+};
+
+// In component
+const [filter, setFilter] = useFilterState();
+void setFilter('active'); // Updates URL with ?filter=active
+</example>
+
+<example type="invalid">
+// Incorrect approach without Promise typing
+export default function Page({ 
+  params 
+}: { 
+  params: { id: string } // Missing Promise wrapper
+}) {
+  return <div>ID: {params.id}</div>; // Will cause type errors or runtime issues
+}
+</example>
+
+<example type="invalid">
+// Incorrect approach without awaiting the Promise
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> }
+) {
+  // Missing await
+  return Response.json({ slug: params.slug }); // This will not work
+}
+</example>
+
+<example type="invalid">
+// NEVER use useSearchParams from Next.js
+import { useSearchParams } from 'next/navigation';
+
+function Component() {
+  const searchParams = useSearchParams(); // DON'T DO THIS
+  const filter = searchParams.get('filter');
+}
+</example>
+
+<example type="invalid">
+// Avoid defining query parameters directly in components
+const [filter, setFilter] = useQueryState('filter', parseAsString);
+setFilter('active'); // Missing void and proper configuration
+</example>
+
+<example>
+// Type-Safe Routing with defineRoute
+// 1. Define route schema with proper typing
+export type RouteSchemas = {
+  character: {
+    params: {
+      characterId: string;
+      username: string;
+    };
+    search?: {
+      preview?: 'true';
+    };
+  };
+};
+
+// 2. Create route with defineRoute
+export const routes = {
+  character: defineRoute<RouteSchemas['character']>('/@[username]/c/[characterId]'),
+};
+
+// 3. Use in navigation with type safety
+// ✅ Correct: Pass parameters directly
+router.push(routes.character({ 
+  characterId: '123',
+  username: 'john',
+}));
+
+// 4. With optional search params
+router.push(routes.character({ 
+  characterId: '123',
+  username: 'john',
+  search: {
+    preview: 'true'
+  }
+}));
+</example>
+
+<example type="invalid">
+// ❌ Missing type safety in routes
+export const routes = {
+  character: '/@[username]/c/[characterId]',
+};
+
+// ❌ Unsafe string concatenation
+router.push(`/@${username}/c/${characterId}`);
+
+// ❌ Wrong parameter structure - don't wrap in 'params'
+router.push(routes.character({
+  params: {
+    characterId,
+    username,
+  }
+}));
+</example>

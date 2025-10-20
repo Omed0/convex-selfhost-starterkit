@@ -1,0 +1,606 @@
+---
+description: Polar payment integration with Better Auth for subscriptions and usage-based billing
+globs: convex/polar*.ts,convex/auth.ts,src/**/*billing*.tsx,src/**/*checkout*.tsx
+alwaysApply: false
+---
+
+# Convex Polar with Better Auth
+
+## Architecture
+
+**Integration:** Better Auth Polar plugin → Webhooks → Convex mutations → Database  
+**Key Files:** `convex/auth.ts`, `convex/polar*.ts`, `convex/polarInternal.ts`
+
+## Schema Integration
+
+**Edit:** `convex/schema.ts`
+
+```typescript
+// Users table - Polar customer ID directly
+users: defineEnt({
+  // ... other fields ...
+})
+  .field('customerId', v.optional(v.string()), { index: true }) // Polar customer ID
+  .edges('subscriptions', { to: 'subscriptions', ref: 'userId' }),
+
+// Subscriptions table
+subscriptions: defineEnt({
+  createdAt: v.string(),
+  status: v.string(),  // 'active', 'canceled', 'trialing', 'past_due'
+  currentPeriodStart: v.string(),
+  currentPeriodEnd: v.optional(v.union(v.string(), v.null())),
+  cancelAtPeriodEnd: v.boolean(),
+  productId: v.string(),
+  metadata: v.record(v.string(), v.any()),
+})
+  .field('subscriptionId', v.string(), { unique: true })
+  .edge('user', { to: 'user', field: 'userId' })
+  .index('userId_status', ['userId', 'status'])
+```
+
+## Better Auth Configuration
+
+**Edit:** `convex/auth.ts`
+
+```typescript
+// Add polyfills for Convex environment
+import './polar/polyfills';
+
+import {
+  polar,
+  checkout,
+  portal,
+  usage,
+  webhooks,
+} from '@polar-sh/better-auth';
+import { Polar } from '@polar-sh/sdk';
+import { getPolarClient } from './polarInternal';
+
+plugins: [
+  polar({
+    client: getPolarClient()
+    createCustomerOnSignUp: true, // Auto-create on signup
+    use: [
+      checkout({
+        authenticatedUsersOnly: true,
+        products: [
+          { productId: process.env.POLAR_PRODUCT_PREMIUM!, slug: 'premium' },
+          {
+            productId: process.env.POLAR_PRODUCT_TEAM!,
+            slug: 'team',
+          },
+        ],
+        successUrl: '/success?checkout_id={CHECKOUT_ID}',
+        theme: 'light',
+      }),
+      portal(), // Customer portal management
+      usage(), // Usage-based billing
+      webhooks({
+        secret: process.env.POLAR_WEBHOOK_SECRET!,
+        onCustomerCreated: async (payload) => {
+          await ctx.runMutation(
+            internal.polarInternal.updateUserPolarCustomerId,
+            {
+              customerId: payload.data.id,
+              userId: payload.data.metadata.userId as Id<'user'>,
+            }
+          );
+        },
+        onCustomerStateChanged: async (payload) => {
+          // Comprehensive customer state update with meters
+          // See detailed documentation below for payload structure
+          if (payload.data.activeMeters?.length > 0) {
+            await ctx.runMutation(
+              internal.polarInternal.syncUserCreditsFromMeters,
+              {
+                customerId: payload.data.id,
+                meters: payload.data.activeMeters.map((meter) => ({
+                  meterId: meter.meterId,
+                  consumedUnits: meter.consumedUnits || 0,
+                  creditedUnits: meter.creditedUnits || 0,
+                  balance: meter.balance || 0,
+                })),
+              }
+            );
+          }
+        },
+        onSubscriptionCreated: async (payload) => {
+          await ctx.runMutation(internal.polarInternal.createSubscription, {
+            subscription: convertToDatabaseSubscription(payload.data),
+          });
+        },
+        onSubscriptionUpdated: async (payload) => {
+          await ctx.runMutation(internal.polarInternal.updateSubscription, {
+            subscription: convertToDatabaseSubscription(payload.data),
+          });
+        },
+      }),
+    ],
+    getCustomerCreateParams: async (data) => {
+      const user = await getBetterAuthUserById(ctx, data.user.id);
+      return {
+        metadata: { userId: user?.userId }, // Store Convex user ID
+      };
+    },
+  }),
+];
+```
+
+The `webhooks` plugin allows you to invoke handlers for all Polar webhook events:
+
+- `onPayload` - Catch-all handler for any incoming Webhook event
+- `onCheckoutCreated` - Triggered when a checkout is created
+- `onCheckoutUpdated` - Triggered when a checkout is updated
+- `onOrderCreated` - Triggered when an order is created
+- `onOrderPaid` - Triggered when an order is paid
+- `onOrderRefunded` - Triggered when an order is refunded
+- `onRefundCreated` - Triggered when a refund is created
+- `onRefundUpdated` - Triggered when a refund is updated
+- `onSubscriptionCreated` - Triggered when a subscription is created
+- `onSubscriptionUpdated` - Triggered when a subscription is updated
+- `onSubscriptionActive` - Triggered when a subscription becomes active
+- `onSubscriptionCanceled` - Triggered when a subscription is canceled
+- `onSubscriptionRevoked` - Triggered when a subscription is revoked
+- `onSubscriptionUncanceled` - Triggered when a subscription cancellation is reversed
+- `onProductCreated` - Triggered when a product is created
+- `onProductUpdated` - Triggered when a product is updated
+- `onOrganizationUpdated` - Triggered when an organization is updated
+- `onBenefitCreated` - Triggered when a benefit is created
+- `onBenefitUpdated` - Triggered when a benefit is updated
+- `onBenefitGrantCreated` - Triggered when a benefit grant is created
+- `onBenefitGrantUpdated` - Triggered when a benefit grant is updated
+- `onBenefitGrantRevoked` - Triggered when a benefit grant is revoked
+- `onCustomerCreated` - Triggered when a customer is created
+- `onCustomerUpdated` - Triggered when a customer is updated
+- `onCustomerDeleted` - Triggered when a customer is deleted
+- `onCustomerStateChanged` - Triggered when a customer state changes
+
+## Customer State Changed Webhook
+
+The `onCustomerStateChanged` webhook provides comprehensive customer state updates including subscriptions, benefits, and meter balances.
+
+### Payload Structure (camelCase)
+
+```typescript
+interface CustomerStateChangedPayload {
+  type: 'customer.state_changed';
+  data: {
+    // Core customer fields
+    id: string; // Polar customer ID
+    createdAt: string; // ISO 8601 timestamp
+    modifiedAt: string | null;
+    deletedAt?: string | null; // If customer was deleted
+
+    // Customer identification
+    externalId?: string | null; // Your user ID (e.g., "usr_1337")
+    email: string;
+    emailVerified: boolean;
+    name?: string | null;
+    avatarUrl?: string | null; // Gravatar or custom avatar URL
+
+    // Organization
+    organizationId?: string; // Polar organization ID
+
+    // Custom data
+    metadata: Record<string, any>; // Custom metadata (e.g., { userId: "..." })
+
+    // Billing information
+    billingAddress?: {
+      line1?: string;
+      line2?: string;
+      postalCode?: string;
+      city?: string;
+      state?: string;
+      country?: string; // ISO 3166-1 alpha-2 code (e.g., "US")
+    } | null;
+
+    // Tax identification (array format: [id, type])
+    taxId?: [string, string] | null; // e.g., ["911144442", "us_ein"]
+
+    // Active subscriptions with meter details
+    activeSubscriptions?: Array<{
+      id: string;
+      createdAt: string;
+      modifiedAt: string | null;
+      customFieldData?: Record<string, any>;
+      metadata?: Record<string, any>;
+      status: 'active' | 'trialing' | 'past_due' | 'canceled' | 'unpaid';
+      amount: number; // In smallest currency unit (cents)
+      currency: string; // ISO 4217 code (e.g., "usd")
+      recurringInterval: 'month' | 'year';
+      currentPeriodStart: string;
+      currentPeriodEnd: string;
+      cancelAtPeriodEnd: boolean;
+      canceledAt?: string | null;
+      startedAt?: string | null;
+      endsAt?: string | null;
+      productId: string;
+      discountId?: string | null;
+
+      // Meter usage within subscription
+      meters?: Array<{
+        id: string;
+        createdAt: string;
+        modifiedAt: string | null;
+        consumedUnits: number;
+        creditedUnits: number;
+        amount: number; // Cost for overage
+        meterId: string;
+      }>;
+    }>;
+
+    // Granted benefits
+    grantedBenefits?: Array<{
+      id: string;
+      createdAt: string;
+      modifiedAt: string | null;
+      grantedAt: string;
+      benefitId: string;
+      benefitType:
+        | 'custom'
+        | 'articles'
+        | 'ads'
+        | 'discord'
+        | 'github_repository'
+        | 'downloadables';
+      benefitMetadata?: Record<string, any>;
+      properties?: {
+        // Discord-specific
+        guildId?: string;
+        roleId?: string;
+        // GitHub-specific
+        repositoryId?: string;
+        repositoryOwner?: string;
+        repositoryName?: string;
+        permission?: 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
+        // Downloadables
+        files?: Array<{ id: string; name: string }>;
+        // Custom
+        note?: string;
+        [key: string]: any;
+      };
+    }>;
+
+    // Active usage meters (aggregated across all subscriptions)
+    activeMeters?: Array<{
+      id: string;
+      createdAt: string;
+      modifiedAt: string | null;
+      meterId: string;
+      consumedUnits: number;
+      creditedUnits: number;
+      balance: number; // creditedUnits - consumedUnits
+    }>;
+  };
+}
+```
+
+## Client Configuration
+
+**Edit:** `src/lib/auth-client.ts`
+
+```typescript
+import { createAuthClient } from 'better-auth/react';
+import { polarClient } from '@polar-sh/better-auth';
+
+export const authClient = createAuthClient({
+  plugins: [polarClient()],
+});
+```
+
+## Critical API Distinctions
+
+| Feature             | Server (`auth.api.*`) | Client (`authClient.*`)       | Notes            |
+| ------------------- | --------------------- | ----------------------------- | ---------------- |
+| **Checkout**        | `checkout`            | `checkout`                    | Both at root     |
+| **Customer Portal** | `portal`              | `customer.portal`             | Different paths! |
+| **Customer State**  | `state`               | `customer.state`              | Different paths! |
+| **Benefits**        | `benefits`            | `customer.benefits.list`      | Different paths! |
+| **Orders**          | `orders`              | `customer.orders.list`        | Different paths! |
+| **Subscriptions**   | `subscriptions`       | `customer.subscriptions.list` | Different paths! |
+| **Usage Ingestion** | `ingestion`           | `usage.ingestion`             | Different paths! |
+| **Meters**          | `meters`              | `usage.meters.list`           | Different paths! |
+
+## Server-Side API Pattern
+
+**Edit:** `convex/auth.ts` (webhook handlers)
+
+**CRITICAL:** `auth.api.*` calls are HTTP requests - only use in actions or webhook handlers, NOT in queries/mutations!
+
+```typescript
+// In webhook handlers (convex/auth.ts)
+webhooks({
+  onCustomerStateChanged: async (payload) => {
+    const auth = createAuth(ctx);
+    const headers = await betterAuthComponent.getHeaders(ctx);
+
+    // ALL Polar APIs at root level via auth.api
+    await auth.api.checkout({
+      body: { slug: 'premium', referenceId: orgId },
+      headers,
+    });
+
+    await auth.api.portal({ headers }); // Customer portal
+    await auth.api.state({ headers }); // Customer state
+
+    await auth.api.benefits({ query: { page: 1, limit: 10 }, headers });
+    await auth.api.orders({
+      query: { page: 1, limit: 10, productBillingType: 'recurring' },
+      headers,
+    });
+    await auth.api.subscriptions({
+      query: { page: 1, limit: 10, active: true },
+      headers,
+    });
+
+    await auth.api.ingestion({
+      body: { event: 'ai_usage', metadata: { tokens: 1000 } },
+      headers,
+    });
+    await auth.api.meters({ query: { page: 1, limit: 10 }, headers });
+  },
+});
+```
+
+## Client-Side API Pattern
+
+```typescript
+// Checkout - at root level
+await authClient.checkout({
+  slug: 'premium', // OR products: ['product-id-uuid']
+  referenceId: organizationId, // Track org purchases
+});
+
+// Portal APIs - under customer namespace
+await authClient.customer.portal(); // Open portal
+const { data: state } = await authClient.customer.state();
+const { data: benefits } = await authClient.customer.benefits.list({
+  query: { page: 1, limit: 10 },
+});
+const { data: orders } = await authClient.customer.orders.list({
+  query: {
+    page: 1,
+    limit: 10,
+    productBillingType: 'recurring',
+    referenceId: organizationId, // Filter by org
+  },
+});
+const { data: subscriptions } = await authClient.customer.subscriptions.list({
+  query: { page: 1, limit: 10, active: true },
+});
+
+// Usage APIs - under usage namespace
+const { data: ingested } = await authClient.usage.ingestion({
+  event: 'file-uploads',
+  metadata: { uploadedFiles: 12 },
+});
+const { data: meters } = await authClient.usage.meters.list({
+  query: { page: 1, limit: 10 },
+});
+```
+
+## Product Configuration
+
+**Edit:** `convex/polar/polarProducts.ts`
+
+```typescript
+// Hardcoded products (no database table)
+export const products: PolarProduct[] = [
+  {
+    id: process.env.POLAR_PRODUCT_PREMIUM!,
+    slug: 'premium',
+    name: 'Premium',
+    recurringInterval: 'month',
+    price: { month: 1000, year: 10000 }, // In cents
+  },
+];
+
+export const getProduct = (productId: string) =>
+  products.find((p) => p.id === productId);
+```
+
+## Internal Mutations (Webhooks)
+
+**Edit:** `convex/polarInternal.ts`
+
+```typescript
+// Update user's Polar customer ID
+export const updateUserPolarCustomerId = createInternalMutation()({
+  args: { customerId: z.string(), userId: zid('user') },
+  returns: z.null(),
+  handler: async (ctx, args) => {
+    const user = await ctx.table('user').getX(args.userId);
+
+    // Check for duplicate
+    const existingUser = await ctx
+      .table('user')
+      .get('customerId', args.customerId);
+    if (existingUser && existingUser._id !== args.userId) {
+      throw new ConvexError({
+        code: 'DUPLICATE_CUSTOMER',
+        message: `Another user already has customer ID ${args.customerId}`,
+      });
+    }
+
+    await user.patch({ customerId: args.customerId });
+    return null;
+  },
+});
+
+// Create subscription from webhook
+export const createSubscription = createInternalMutation()({
+  args: {
+    subscription: extendConvexSchema(schema.tables.subscriptions.validator, {
+      productId: z.string(),
+      subscriptionId: z.string(),
+      userId: zid('user'),
+    }),
+  },
+  returns: z.null(),
+  handler: async (ctx, args) => {
+    const product = getProduct(args.subscription.productId);
+    if (!product) {
+      throw new ConvexError({
+        code: 'INVALID_PRODUCT',
+        message: `Product ${args.subscription.productId} not found`,
+      });
+    }
+
+    await ctx.table('subscriptions').insert(args.subscription);
+    return null;
+  },
+});
+```
+
+## Server API Operations (Webhook/Action Only)
+
+```typescript
+// Setup once in webhook handler or action
+const auth = createAuth(ctx);
+const headers = await betterAuthComponent.getHeaders(ctx);
+
+// Then use any Polar API:
+
+// Checkout
+await auth.api.checkout({
+  body: {
+    slug: 'premium',
+    products: ['product-id'],
+    referenceId: organizationId, // Saved in metadata
+  },
+  headers,
+});
+
+// Customer state
+const state = await auth.api.state({ headers });
+// Returns: customer data, active subscriptions, benefits, meter balances
+
+// List subscriptions
+const subscriptions = await auth.api.subscriptions({
+  query: { page: 1, limit: 10, active: true },
+  headers,
+});
+
+// Organization subscriptions via orders
+const orders = await auth.api.orders({
+  query: {
+    productBillingType: 'recurring',
+    referenceId: organizationId,
+    active: true,
+  },
+  headers,
+});
+const hasActiveSubscription = orders?.some(
+  (order) => order.status === 'active'
+);
+
+// Usage-based billing
+await auth.api.ingestion({
+  body: {
+    event: 'ai_usage',
+    metadata: { tokens: 1000 }, // { uploadedFiles: 12 }
+  },
+  headers,
+});
+
+const meters = await auth.api.meters({
+  query: { page: 1, limit: 10 },
+  headers,
+});
+// Returns: customer info, meter config, consumed/credited units, balance
+```
+
+## Common Patterns
+
+### Check Subscription Status
+
+```typescript
+// In auth context
+const isSubscribed = !!ctx.user.plan;
+
+// Via internal query
+const subscription = await getCurrentSubscription(ctx, { userId });
+const isActive = subscription?.status === 'active';
+
+// Via customer state (in action/webhook - after auth setup)
+const state = await auth.api.state({ headers });
+const hasActiveSubscription = state?.subscriptions?.some(
+  (s) => s.status === 'active'
+);
+```
+
+### Organization Access Check
+
+```typescript
+// Check if org has active subscription (client-side)
+const organizationId = (await authClient.organization.list())?.data?.[0]?.id;
+
+const { data: orders } = await authClient.customer.orders.list({
+  query: {
+    productBillingType: 'recurring',
+    referenceId: organizationId,
+    active: true,
+  },
+});
+
+const hasAccess = orders?.some((order) => order.status === 'active');
+```
+
+## Environment Variables
+
+```bash
+# Polar API
+POLAR_ACCESS_TOKEN="polar_at_..."
+POLAR_WEBHOOK_SECRET="whsec_..."
+
+# Product IDs (from Polar dashboard)
+POLAR_PRODUCT_PREMIUM="uuid-here"
+POLAR_PRODUCT_TEAM="uuid-here"
+
+# Environment
+DEPLOY_ENV="development"  # or "production"
+```
+
+## API Quick Reference
+
+**Public Queries:**
+
+- `getCurrentUser`: Get user with subscription status
+
+**Internal Queries:**
+
+- `getCurrentSubscription`: Get active subscription with product
+
+**Internal Mutations:**
+
+- `updateUserPolarCustomerId`: Link Polar customer to user
+- `createSubscription`: Create subscription from webhook
+- `updateSubscription`: Update subscription from webhook
+
+## Security
+
+1. **Webhook Verification**: Always verify signatures via `POLAR_WEBHOOK_SECRET`
+2. **Internal Mutations**: Only callable by Convex system
+3. **Rate Limiting**: Applied to all user-facing mutations
+4. **Customer Isolation**: Users can only access their own data
+
+## Common Issues
+
+**Customer ID Not Set:**
+
+```typescript
+// Check if user has Polar customer
+if (!user.customerId) {
+  // Created automatically on signup with createCustomerOnSignUp: true
+}
+```
+
+**Subscription Not Found:**
+
+```typescript
+// Subscriptions created via webhooks - check webhook config
+const sub = await getCurrentSubscription(ctx, { userId });
+if (!sub) {
+  // User has no active subscription
+}
+```

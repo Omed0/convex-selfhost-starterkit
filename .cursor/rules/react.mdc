@@ -1,0 +1,33 @@
+---
+description: ALL react patterns to follow
+globs: *.tsx
+alwaysApply: false
+---
+
+# React Patterns
+
+<version>1.0.0</version>
+
+## Context
+
+- @.cursor/rules/nextjs.mdc - Next.js patterns
+- @.cursor/rules/global-css.mdc - CSS configuration
+- @.cursor/rules/tailwind-v4.mdc - Tailwind v4 features
+- When creating or modifying React components
+- When defining component props and their types
+- Applies to both functional and class components
+
+## Requirements
+
+- Always use destructured props in function parameters
+- Define TypeScript types inline with the destructured props
+- Avoid creating separate interfaces for component props
+- Avoid non-destructured props that require additional destructuring inside the component
+- Use available UI components from the component library
+- Use CSS variables from globals.css for consistent theming
+- Use Tailwind v4: [tailwind-v4.mdc](mdc:.cursor/rules/tailwind-v4.mdc)
+
+## UI Components
+
+- All shadcn components are available in `src/components/ui`.
+- `Button`, `DropdownMenuItem`: DO NOT add `mr-2` to icons, we already use `gap-2`

@@ -1,0 +1,172 @@
+---
+description: USE Tailwind CSS v4 import syntax and theme configuration in global CSS files to ENSURE proper styling foundation CSS-first configuration
+globs: **/globals.css
+alwaysApply: false
+---
+# Global CSS Configuration
+
+## Core Changes
+
+- **CSS-first configuration**: Configuration is now done in CSS instead of JavaScript
+  - Use `@theme` directive in CSS instead of `tailwind.config.js`
+  - Example:
+    ```css
+    @import "tailwindcss";
+
+    @theme {
+      --font-display: "Satoshi", "sans-serif";
+      --breakpoint-3xl: 1920px;
+      --color-avocado-500: oklch(0.84 0.18 117.33);
+      --ease-fluid: cubic-bezier(0.3, 0, 0, 1);
+    }
+    ```
+- Legacy `tailwind.config.js` files can still be imported using the `@config` directive:
+  ```css
+  @import "tailwindcss";
+  @config "../../tailwind.config.js";
+  ```
+- **CSS import syntax**: Use `@import "tailwindcss"` instead of `@tailwind` directives
+  - Old: `@tailwind base; @tailwind components; @tailwind utilities;`
+  - New: `@import "tailwindcss";`
+
+- **Package changes**:
+  - PostCSS plugin is now `@tailwindcss/postcss` (not `tailwindcss`)
+  - CLI is now `@tailwindcss/cli`
+  - Vite plugin is `@tailwindcss/vite`
+  - No need for `postcss-import` or `autoprefixer` anymore
+
+- **Native CSS cascade layers**: Uses real CSS `@layer` instead of Tailwind's custom implementation
+
+
+## Custom Extensions
+
+- **Custom utilities**: Use `@utility` directive
+  ```css
+  @utility tab-4 {
+    tab-size: 4;
+  }
+  ```
+
+- **Custom variants**: Use `@variant` directive
+  ```css
+  @variant pointer-coarse (@media (pointer: coarse));
+  @variant theme-midnight (&:where([data-theme="midnight"] *));
+  ```
+
+- **Plugins**: Use `@plugin` directive
+  ```css
+  @plugin "@tailwindcss/typography";
+  ```
+
+## Advanced Configuration
+
+- **Using a prefix**:
+  ```css
+  @import "tailwindcss" prefix(tw);
+  ```
+  - Results in classes like `tw:flex`, `tw:bg-red-500`, `tw:hover:bg-red-600`
+
+- **Source detection**:
+  - Automatic by default (ignores `.gitignore` files and binary files)
+  - Add sources: `@source "../node_modules/@my-company/ui-lib";`
+  - Disable automatic detection: `@import "tailwindcss" source(none);`
+
+- **Legacy config files**:
+  ```css
+  @import "tailwindcss";
+  @config "../../tailwind.config.js";
+  ```
+
+- **Dark mode configuration**:
+  ```css
+  @import "tailwindcss";
+  @variant dark (&:where(.dark, .dark *));
+  ```
+
+- **Container customization**: Extend with `@utility`
+  ```css
+  @utility container {
+    margin-inline: auto;
+    padding-inline: 2rem;
+  }
+  ```
+
+- **Using `@apply` in Vue/Svelte**:
+  ```html
+  <style>
+    @import "../../my-theme.css" theme(reference);
+    /* or */
+    @import "tailwindcss/theme" theme(reference);
+    
+    h1 {
+      @apply font-bold text-2xl text-red-500;
+    }
+  </style>
+  ```
+
+# Rules
+
+<version>1.0.0</version>
+
+## Context
+- When configuring global CSS files in the project
+- When setting up theme variables and importing Tailwind CSS
+- When establishing the base styling foundation for the application
+
+## Requirements
+- Use `@import "tailwindcss"` instead of `@tailwind` directives
+- Configure theme using CSS variables with `@theme` directive
+- Define color variables using modern color formats (oklch, lch)
+- Organize CSS variables with consistent naming patterns (`--category-name-value`)
+- Use native CSS cascade layers for organizing styles
+- Include essential global resets and base styles
+
+## Examples
+
+<example>
+```css
+@import "tailwindcss";
+
+@theme {
+  /* Color system */
+  --color-primary-500: oklch(0.84 0.18 117.33);
+  --color-secondary-500: oklch(0.78 0.12 230.45);
+  
+  /* Typography */
+  --font-display: "Satoshi", "sans-serif";
+  --font-body: "Inter var", "sans-serif";
+  
+  /* Spacing */
+  --spacing-page: 1rem;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+```
+This global CSS properly uses Tailwind v4 imports, theme variables, and layer organization.
+</example>
+
+<example type="invalid">
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary: #3b82f6;
+  --secondary: #10b981;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
+    Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
+}
+```
+This uses outdated Tailwind v3 directives and doesn't leverage the @theme configuration option.
+</example>
